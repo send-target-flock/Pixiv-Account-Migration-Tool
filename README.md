@@ -63,8 +63,8 @@ Follow the interactive prompts:
 |-----------|-------------|---------|
 | `extract_delay` | Delay (seconds) between data extraction requests | `1.0` |
 | `migrate_delay` | Base delay (seconds) between migration actions | `2.5` |
-| `max_retries` | Max retries on rate limit (`-1` = infinite) | `-1` |
-| `retry_wait` | Wait time (seconds) before retrying | `60` |
+| `max_retries` | Max retries on rate limit (`-1` = infinite) | `4` |
+| `retry_wait` | Wait time (seconds) before retrying | `90` |
 
 ---
 
