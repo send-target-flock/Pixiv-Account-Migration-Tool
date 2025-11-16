@@ -33,6 +33,7 @@ A robust, command-line tool to migrate follows and bookmarks between Pixiv accou
 ```bash
 # Clone the repository
 git clone https://github.com/send-target-flock/Pixiv-Account-Migration-Tool
+
 cd Pixiv-Account-Migration-Tool
 
 # Install dependencies
