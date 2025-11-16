@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Pixiv Account Migration Tool
-
-Features:
-- Migrate follows and bookmarks from one account to another
-- Smart deduplication (skip items already present in target account)
-- Chronological order preservation (reverse migration to maintain timeline)
-- Intelligent rate-limit handling with configurable retries (-1 for infinite)
-- Comprehensive final report on success or failure
-- No intermediate files: only final report is written to disk
-
-Note: This script uses refresh tokens for authentication.
-Ensure tokens are valid and have necessary permissions.
-"""
 
 import time
-import sys
 from datetime import datetime
 from pixivpy3 import AppPixivAPI
 
@@ -31,6 +16,8 @@ class PixivAccountMigrator:
         self.target_api = AppPixivAPI()
         self.source_user_id = None
         self.target_user_id = None
+        self.target_follows_existing = {"public": set(), "private": set()}
+        self.target_bookmarks_existing = {"public": set(), "private": set()}
 
     def complete_login(self, source_token, target_token):
         """Log in to both source and target accounts using refresh tokens.
@@ -90,7 +77,7 @@ class PixivAccountMigrator:
         return all_items
 
     def _fetch_existing_following_set(self, restrict="public"):
-        """Retrieve existing follows from target account for deduplication.
+        """Retrieve existing follows from target account.
         
         Args:
             restrict (str): 'public' or 'private'
@@ -98,22 +85,19 @@ class PixivAccountMigrator:
         Returns:
             set: User IDs already followed by target account under given visibility.
         """
-        print("Fetching target account's existing {} following for deduplication...".format(restrict))
         try:
             user_previews = self._fetch_paginated_data(
                 api_method=self.target_api.user_following,
                 initial_args={"user_id": self.target_user_id, "restrict": restrict},
                 result_key="user_previews"
             )
-            user_ids = {p.user.id for p in user_previews}
-            print("Found {} existing {} follows.".format(len(user_ids), restrict))
-            return user_ids
+            return {p.user.id for p in user_previews}
         except Exception as e:
             print("Failed to fetch target's {} following: {}".format(restrict, e))
             return set()
 
     def _fetch_existing_bookmarks_set(self, restrict="public"):
-        """Retrieve existing bookmarks from target account for deduplication.
+        """Retrieve existing bookmarks from target account.
         
         Args:
             restrict (str): 'public' or 'private'
@@ -121,32 +105,50 @@ class PixivAccountMigrator:
         Returns:
             set: Illustration IDs already bookmarked by target account under given visibility.
         """
-        print("Fetching target account's existing {} bookmarks for deduplication...".format(restrict))
         try:
             illusts = self._fetch_paginated_data(
                 api_method=self.target_api.user_bookmarks_illust,
                 initial_args={"user_id": self.target_user_id, "restrict": restrict},
                 result_key="illusts"
             )
-            illust_ids = {i.id for i in illusts}
-            print("Found {} existing {} bookmarks.".format(len(illust_ids), restrict))
-            return illust_ids
+            return {i.id for i in illusts}
         except Exception as e:
             print("Failed to fetch target's {} bookmarks: {}".format(restrict, e))
             return set()
 
+    def prepare_dedup_data(self, need_follows=False, need_bookmarks=False):
+        """Pre-fetch target account's existing data for deduplication."""
+        if not need_follows and not need_bookmarks:
+            return
+
+        print("→ Preparing deduplication data...")
+        print("-" * 40)
+
+        if need_follows:
+            print("→ Fetching target's existing follows...")
+            self.target_follows_existing["public"] = self._fetch_existing_following_set("public")
+            count_pub = len(self.target_follows_existing["public"])
+            self.target_follows_existing["private"] = self._fetch_existing_following_set("private")
+            count_priv = len(self.target_follows_existing["private"])
+            print("  ✓ Found {} public, {} private follows.".format(count_pub, count_priv))
+
+        if need_bookmarks:
+            print("→ Fetching target's existing bookmarks...")
+            self.target_bookmarks_existing["public"] = self._fetch_existing_bookmarks_set("public")
+            count_pub = len(self.target_bookmarks_existing["public"])
+            self.target_bookmarks_existing["private"] = self._fetch_existing_bookmarks_set("private")
+            count_priv = len(self.target_bookmarks_existing["private"])
+            print("  ✓ Found {} public, {} private bookmarks.".format(count_pub, count_priv))
+
+        print()
+
     def extract_following_list(self, user_id, restrict="public"):
-        """Extract following list (user previews) from source account.
-        
-        Args:
-            user_id (int): Source user ID.
-            restrict (str): Visibility filter ('public' or 'private').
+        """Extract following list from source account.
         
         Returns:
-            list[dict] or None: List of user info dicts, or None on failure.
-                Each dict contains: user_id, name, account, restrict.
+            list[dict] or None: Each dict: user_id, name, account, restrict.
         """
-        print("Extracting {} following list for user {}...".format(restrict, user_id))
+        print("→ Extracting source {} follows...".format(restrict))
         try:
             user_previews = self._fetch_paginated_data(
                 api_method=self.source_api.user_following,
@@ -159,24 +161,19 @@ class PixivAccountMigrator:
                 "account": p.user.account,
                 "restrict": restrict
             } for p in user_previews]
-            print("Extracted {} {} follows.".format(len(following_list), restrict))
+            print("  Extracted {} {} follows.".format(len(following_list), restrict))
             return following_list
         except Exception as e:
-            print("Error extracting {} follows: {}".format(restrict, e))
+            print("  Error extracting {} follows: {}".format(restrict, e))
             return None
 
     def extract_bookmarks(self, user_id, restrict="public"):
         """Extract bookmarked illustrations from source account.
         
-        Args:
-            user_id (int): Source user ID.
-            restrict (str): Visibility filter ('public' or 'private').
-        
         Returns:
-            list[dict] or None: List of bookmark info dicts, or None on failure.
-                Each dict contains: illust_id, title, author, restrict.
+            list[dict] or None: Each dict: illust_id, title, author, restrict.
         """
-        print("Extracting {} bookmarks for user {}...".format(restrict, user_id))
+        print("→ Extracting source {} bookmarks...".format(restrict))
         try:
             illusts = self._fetch_paginated_data(
                 api_method=self.source_api.user_bookmarks_illust,
@@ -189,26 +186,14 @@ class PixivAccountMigrator:
                 "author": i.user.name,
                 "restrict": restrict
             } for i in illusts]
-            print("Extracted {} {} bookmarks.".format(len(bookmarks), restrict))
+            print("  Extracted {} {} bookmarks.".format(len(bookmarks), restrict))
             return bookmarks
         except Exception as e:
-            print("Error extracting {} bookmarks: {}".format(restrict, e))
+            print("  Error extracting {} bookmarks: {}".format(restrict, e))
             return None
 
     def _perform_action_with_retry(self, action_func, log_name, *args, **kwargs):
-        """Execute an API action with configurable retry on rate limits.
-        
-        Handles rate-limit errors specifically; other errors fail immediately.
-        Applies base migration delay after first attempt.
-        
-        Args:
-            action_func: API method to call (e.g., self.target_api.user_follow_add)
-            log_name (str): Human-readable description for logging
-            *args, **kwargs: Passed to action_func
-        
-        Returns:
-            str: 'success' or 'failed'
-        """
+        """Execute an API action with configurable retry on rate limits."""
         migrate_delay = self.config["migrate_delay"]
         max_retries = self.config["max_retries"]
         retry_wait = self.config["retry_wait"]
@@ -218,14 +203,11 @@ class PixivAccountMigrator:
             try:
                 result = action_func(*args, **kwargs)
 
-                # Check for API-level error
                 if hasattr(result, "error") and result.error:
                     error_msg = result.error.get("user_message") or result.error.get("message", "Unknown error")
-                    # Detect rate limit in English or Japanese
                     is_rate_limit = any(kw in error_msg for kw in ["Rate Limit", "rate limit", "レート制限"])
 
                     if is_rate_limit:
-                        # Retry if allowed
                         if max_retries < 0 or attempt < max_retries:
                             next_attempt = attempt + 2
                             retry_info = "infinite" if max_retries < 0 else "{}/{}".format(next_attempt, max_retries + 1)
@@ -239,7 +221,6 @@ class PixivAccountMigrator:
                                 log_name, max_retries + 1, error_msg))
                             return "failed"
                     else:
-                        # Non-rate-limit error: fail immediately
                         print("Action failed: '{}' → {}".format(log_name, error_msg))
                         return "failed"
                 else:
@@ -250,27 +231,14 @@ class PixivAccountMigrator:
                 return "failed"
 
             finally:
-                # Apply base migration delay only after the first attempt
                 if attempt == 0:
                     time.sleep(migrate_delay)
 
     def migrate_following(self, following_list):
-        """Migrate following list to target account with deduplication and order preservation.
-        
-        Skips users already followed (respecting visibility). Migrates oldest first
-        to preserve chronological order in target account's following list.
-        
-        Args:
-            following_list (list[dict]): List from extract_following_list()
-        
-        Returns:
-            tuple: (success_count: int, failed_list: list[dict])
-        """
-        # Fetch target's existing follows for deduplication
-        existing_public = self._fetch_existing_following_set("public")
-        existing_private = self._fetch_existing_following_set("private")
+        """Migrate following list with deduplication and order preservation."""
+        existing_public = self.target_follows_existing["public"]
+        existing_private = self.target_follows_existing["private"]
 
-        # Filter out already-followed users
         filtered_list = []
         for user in following_list:
             uid = user["user_id"]
@@ -285,7 +253,7 @@ class PixivAccountMigrator:
         to_migrate = len(filtered_list)
         skipped = total_original - to_migrate
         if skipped > 0:
-            print("Skipped {} already-followed users (deduplication enabled).".format(skipped))
+            print("Skipped {} already-followed users.".format(skipped))
 
         print("Starting migration of {} follows (base delay: {} seconds)...".format(to_migrate, self.config["migrate_delay"]))
         if to_migrate == 0:
@@ -295,8 +263,6 @@ class PixivAccountMigrator:
         success_count = 0
         failed_list = []
 
-        # Reverse order: source returns newest first → migrate oldest first
-        # so target's following list maintains correct chronological order
         for i, user in enumerate(reversed(filtered_list), 1):
             log_name = "{} (@{}) [{}]".format(user["name"], user["account"], user["restrict"])
             print("[{}/{}] Processing: {}".format(i, to_migrate, log_name))
@@ -309,7 +275,7 @@ class PixivAccountMigrator:
             )
 
             if status == "success":
-                print("Successfully followed: {}".format(user["name"]))
+                print("  ✓ Successfully followed: {}".format(user["name"]))
                 success_count += 1
             else:
                 failed_list.append(user)
@@ -318,22 +284,10 @@ class PixivAccountMigrator:
         return success_count, failed_list
 
     def migrate_bookmarks(self, bookmarks):
-        """Migrate bookmarks to target account with deduplication and order preservation.
-        
-        Skips already-bookmarked works (respecting visibility). Migrates oldest first
-        to preserve chronological order in target account's bookmark list.
-        
-        Args:
-            bookmarks (list[dict]): List from extract_bookmarks()
-        
-        Returns:
-            tuple: (success_count: int, failed_list: list[dict])
-        """
-        # Fetch target's existing bookmarks for deduplication
-        existing_public = self._fetch_existing_bookmarks_set("public")
-        existing_private = self._fetch_existing_bookmarks_set("private")
+        """Migrate bookmarks with deduplication and order preservation."""
+        existing_public = self.target_bookmarks_existing["public"]
+        existing_private = self.target_bookmarks_existing["private"]
 
-        # Filter out already-bookmarked works
         filtered_list = []
         for bm in bookmarks:
             iid = bm["illust_id"]
@@ -348,7 +302,7 @@ class PixivAccountMigrator:
         to_migrate = len(filtered_list)
         skipped = total_original - to_migrate
         if skipped > 0:
-            print("Skipped {} already-bookmarked works (deduplication enabled).".format(skipped))
+            print("Skipped {} already-bookmarked works.".format(skipped))
 
         print("Starting migration of {} bookmarks (base delay: {} seconds)...".format(to_migrate, self.config["migrate_delay"]))
         if to_migrate == 0:
@@ -358,7 +312,6 @@ class PixivAccountMigrator:
         success_count = 0
         failed_list = []
 
-        # Reverse order: source returns newest first → migrate oldest first
         for i, bookmark in enumerate(reversed(filtered_list), 1):
             log_name = "'{}' by {} [{}]".format(bookmark["title"], bookmark["author"], bookmark["restrict"])
             print("[{}/{}] Processing: {}".format(i, to_migrate, log_name))
@@ -371,7 +324,7 @@ class PixivAccountMigrator:
             )
 
             if status == "success":
-                print("Successfully bookmarked: '{}'".format(bookmark["title"]))
+                print("  ✓ Successfully bookmarked: '{}'".format(bookmark["title"]))
                 success_count += 1
             else:
                 failed_list.append(bookmark)
@@ -380,14 +333,7 @@ class PixivAccountMigrator:
         return success_count, failed_list
 
     def generate_report(self, results):
-        """Generate a final migration report regardless of success or failure.
-        
-        Always writes a report file named migration_report_YYYYMMDD_HHMMSS.txt.
-        Includes error reasons, partial results, and failure details.
-        
-        Args:
-            results (dict): Collected migration outcomes and errors.
-        """
+        """Generate final migration report regardless of outcome."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_file = "migration_report_{}.txt".format(timestamp)
 
@@ -397,19 +343,16 @@ class PixivAccountMigrator:
                 f.write("=" * 50 + "\n")
                 f.write("Migration Time: {}\n\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-                # Handle early termination
                 if "error" in results:
                     f.write("Termination Reason: {}\n".format(results["error"]))
                     print("Generated error report: {}".format(report_file))
                     return
 
-                # Handle no tasks executed
                 if not results:
                     f.write("No migration tasks were executed.\n")
                     print("Generated empty report: {}".format(report_file))
                     return
 
-                # Follow migration section
                 if "following" in results:
                     res = results["following"]
                     if res.get("failed_extraction"):
@@ -422,7 +365,6 @@ class PixivAccountMigrator:
                                 f.write("  - {} (@{}) [{}]\n".format(user["name"], user["account"], user["restrict"]))
                     f.write("\n")
 
-                # Bookmark migration section (by visibility)
                 if "bookmarks" in results:
                     for restrict_type in ["public", "private"]:
                         if restrict_type in results["bookmarks"]:
@@ -445,7 +387,7 @@ class PixivAccountMigrator:
 
 
 def get_user_config():
-    """Interactively collect runtime configuration from user."""
+    """Interactively collect runtime configuration."""
     print("Migration Configuration")
     print("-" * 30)
 
@@ -492,9 +434,9 @@ def get_user_config():
 
 
 def main():
-    """Main entry point with error-safe report generation."""
-    print("Pixiv Account Data Migration Tool (v5.3 - Clean, Report-Only, Error-Safe)")
-    print("=" * 70)
+    """Main entry point with two-phase execution and error-safe reporting."""
+    print("Pixiv Account Data Migration Tool (v5.4 - Two-Phase, Clean)")
+    print("=" * 65)
 
     config = get_user_config()
     migrator = PixivAccountMigrator(config)
@@ -503,70 +445,84 @@ def main():
     source_token = input("Source account refresh_token: ").strip()
     target_token = input("Target account refresh_token: ").strip()
 
-    # Initialize results dict for final reporting
     results = {}
 
     try:
-        # Attempt login
         if not migrator.complete_login(source_token, target_token):
             results["error"] = "Login failed"
             return
 
-        # User selection
         print("\nSelect data to migrate:")
-        migrate_pub_follow = input("Migrate public follows? (y/n): ").lower() == "y"
-        migrate_priv_follow = input("Migrate private follows? (y/n): ").lower() == "y"
-        migrate_pub_bookmark = input("Migrate public bookmarks? (y/n): ").lower() == "y"
-        migrate_priv_bookmark = input("Migrate private bookmarks? (y/n): ").lower() == "y"
-
+        migrate_pub_follow = input("Migrate public follows? (Y/n): ").strip().lower() != "n"
+        migrate_priv_follow = input("Migrate private follows? (Y/n): ").strip().lower() != "n"
+        migrate_pub_bookmark = input("Migrate public bookmarks? (Y/n): ").strip().lower() != "n"
+        migrate_priv_bookmark = input("Migrate private bookmarks? (Y/n): ").strip().lower() != "n"
         if not any([migrate_pub_follow, migrate_priv_follow, migrate_pub_bookmark, migrate_priv_bookmark]):
             results["error"] = "No migration tasks selected"
             return
 
-        # Process follows
+        # ============================
+        # PHASE 1: EXTRACT SOURCE DATA
+        # ============================
+        print("\n" + "=" * 50)
+        print("→ PHASE 1: Extracting source account data")
+        print("-" * 50)
+
+        source_data = {"following": [], "bookmarks": {}}
+
+        # Extract follows
         if migrate_pub_follow or migrate_priv_follow:
-            print("\n" + "=" * 50)
-            full_following = []
-            extraction_ok = True
             if migrate_pub_follow:
                 pub = migrator.extract_following_list(migrator.source_user_id, "public")
-                if pub is None:
-                    extraction_ok = False
-                else:
-                    full_following.extend(pub)
+                if pub is not None:
+                    source_data["following"].extend(pub)
             if migrate_priv_follow:
                 priv = migrator.extract_following_list(migrator.source_user_id, "private")
-                if priv is None:
-                    extraction_ok = False
-                else:
-                    full_following.extend(priv)
+                if priv is not None:
+                    source_data["following"].extend(priv)
 
-            if not extraction_ok:
-                results["following"] = {"failed_extraction": True}
-            elif full_following:
-                success, failed = migrator.migrate_following(full_following)
-                results["following"] = {
+        # Extract bookmarks
+        if migrate_pub_bookmark or migrate_priv_bookmark:
+            for restrict_type, should in [("public", migrate_pub_bookmark), ("private", migrate_priv_bookmark)]:
+                if should:
+                    bm = migrator.extract_bookmarks(migrator.source_user_id, restrict_type)
+                    if bm is not None:
+                        source_data["bookmarks"][restrict_type] = bm
+
+        # ==============================
+        # PHASE 2: PREPARE DEDUPLICATION
+        # ==============================
+        need_follows = len(source_data["following"]) > 0
+        need_bookmarks = len(source_data["bookmarks"]) > 0
+        if need_follows or need_bookmarks:
+            migrator.prepare_dedup_data(need_follows=need_follows, need_bookmarks=need_bookmarks)
+
+        # =========================
+        # PHASE 3: START MIGRATION
+        # =========================
+        print("=" * 50)
+        print("→ PHASE 3: Starting migration")
+        print("-" * 50)
+
+        # Migrate follows
+        if source_data["following"]:
+            success, failed = migrator.migrate_following(source_data["following"])
+            results["following"] = {
+                "success": success,
+                "total": len(source_data["following"]),
+                "failed": failed
+            }
+
+        # Migrate bookmarks
+        if source_data["bookmarks"]:
+            results["bookmarks"] = {}
+            for restrict_type, bookmarks in source_data["bookmarks"].items():
+                success, failed = migrator.migrate_bookmarks(bookmarks)
+                results["bookmarks"][restrict_type] = {
                     "success": success,
-                    "total": len(full_following),
+                    "total": len(bookmarks),
                     "failed": failed
                 }
-
-        # Process bookmarks
-        if migrate_pub_bookmark or migrate_priv_bookmark:
-            results["bookmarks"] = {}
-            for restrict_type, should_migrate in [("public", migrate_pub_bookmark), ("private", migrate_priv_bookmark)]:
-                if should_migrate:
-                    print("\n" + "=" * 50)
-                    bookmarks = migrator.extract_bookmarks(migrator.source_user_id, restrict_type)
-                    if bookmarks is None:
-                        results["bookmarks"][restrict_type] = {"failed_extraction": True}
-                    else:
-                        success, failed = migrator.migrate_bookmarks(bookmarks)
-                        results["bookmarks"][restrict_type] = {
-                            "success": success,
-                            "total": len(bookmarks),
-                            "failed": failed
-                        }
 
     except KeyboardInterrupt:
         print("\nOperation interrupted by user.")
@@ -578,7 +534,7 @@ def main():
         print("\n" + "=" * 50)
         print("Generating final report...")
         migrator.generate_report(results)
-        print("Report generation completed.")
+        print("Done.")
 
 
 if __name__ == "__main__":
